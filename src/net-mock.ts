@@ -119,6 +119,10 @@ export class CloudflareSocket extends EventEmitter implements Pick<Duplex, 'pipe
   private _cfWriter: WritableStreamDefaultWriter | null = null;
   private _cfReader: ReadableStreamDefaultReader | null = null;
 
+  private _reading = false;
+  private _paused = false;
+  private _listening: boolean = false;
+
   constructor(readonly ssl: boolean, readonly quiet: boolean = true) {
     super();
   }
@@ -157,11 +161,21 @@ export class CloudflareSocket extends EventEmitter implements Pick<Duplex, 'pipe
     return this;
   }
   pause() {
-    // TODO: implement
+    if (this._cfSocket && this._cfReader && !this.connecting && this._reading) {
+      this._reading = false;
+      this._paused = true;
+      this.log("Socket paused");
+    }
     return this;
   }
   resume() {
-    // TODO: implement
+    if (this._cfSocket && this._cfReader && this._paused) {
+      this._paused = false;
+      this._reading = true; // Important to set this back to true
+      if (!this._listening) { // Ensure _listen is only called once
+        this._listen().catch((e) => this.emit('error', e));
+      }
+    }
     return this;
   }
   address() {
@@ -257,19 +271,75 @@ export class CloudflareSocket extends EventEmitter implements Pick<Duplex, 'pipe
   disableRenegotiation() {
     this.log('disableRenegotiation');
   }
+    
   async _listen() {
-    while (true) {
-      this.log(`awaiting receive from CF socket: ${this.ssl ? 'ssl' : ''}`);
-      const { done, value } = await this._cfReader!.read();
-      this.log('CF socket received:', done, Buffer.from(value));
-      if (done) {
-        this.log('done');
-        break;
+    if (this._paused) return;
+    if (this._listening) return;
+    this._listening = true; 
+    this._reading = true;
+    let accumulatedData: Buffer | null = null;
+    let documentSize: number | null = null;
+    let isComplete: boolean = false;
+    try {
+      while (this._reading && !this._paused) {
+        const readResult = await this._readChunk();
+        if (readResult === null) break; 
+        const { done, value } = readResult;
+        if (value === undefined) {
+            if (done) {
+                break;
+            }
+            continue;
+        } 
+        const bufferedValue = Buffer.from(value!);
+        if (accumulatedData === null) {
+          accumulatedData = bufferedValue
+          documentSize = accumulatedData.readInt32LE(0);
+          isComplete = documentSize === accumulatedData.length;
+        } else {
+          accumulatedData = Buffer.concat([accumulatedData!, bufferedValue]);
+          isComplete = documentSize === accumulatedData.length
+        }
+
+        if(   // sanity check 
+            documentSize && (
+            documentSize < 5 || 
+            documentSize >  2000000000
+          )
+        ) { 
+          this.destroy(new Error("Invalid document size"));
+          break;
+        }
+        if(isComplete) {
+          try {
+            this.emit('data', accumulatedData);
+            [...this.sinks.values()].forEach((sink) => {
+                sink.write(accumulatedData!);
+            });
+          } catch (error) {
+            this.emit('error', error);
+          }
+          documentSize = null;
+          accumulatedData = null;
+        }
+        if(done) break;
       }
-      this.emit('data', Buffer.from(value));
-      [...this.sinks.values()].forEach((sink) => {
-        sink.write(value);
-      });
+    } catch (e) {
+      this.emit('error', e);
+      this._reading = false;
+    } finally {
+      this._listening = false; 
+    }
+  }
+  
+  private async _readChunk(): Promise<{ done: boolean; value?: Uint8Array | null } | null> {
+    console.log("Entering _readChunk()");
+    try {
+      const readResult = await this._cfReader!.read();
+      return readResult;
+    } catch (error) {
+      console.log("Error in _readChunk():", error);
+      return null;
     }
   }
 
