@@ -1,3 +1,6 @@
+# NOTE: Deprecated
+With latest workerd compatibility with the nodejs apis, `tls` has enough support to reliably use `mongodb` npm module without issue
+
 # cf-mongodb-polyfills
 This package allows the use of the `mongodb` npm package in a cloudflare worker. It does this by polyfilling the `net` and `tls` modules in the `mongodb` package to use the `cf-mongodb-polyfills` package instead.
 
